@@ -7,12 +7,13 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+    "net"
 	"os"
 	"os/exec"
 	"regexp"
 	"sort"
 	"strings"
-
+	"time"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -77,6 +78,9 @@ func version() {
 func main() {
 	inceptionPtr := flag.Bool("inception", false, "allow locksmith in locksmith")
 	versionPtr := flag.Bool("version", false, "show version")
+	rpcServerPort := flag.Int("credentialsServerPort", 0, "Start Locksmith as a credentials server")
+	rpcClientPort := flag.Int("credentialsClientPort", 0, "Start Locksmith as a credentials client")
+	
 	flag.Parse()
 
 	if *versionPtr {
@@ -93,7 +97,62 @@ func main() {
 				"-inception argument.")
 		os.Exit(41)
 	}
+		
+	if *rpcClientPort > 0 {
+		//just open a socket and get the data
+		
+		server,err:=net.Dial("tcp", fmt.Sprintf("%s:%v","localhost",*rpcClientPort ))
+		if err != nil {
+			log.Fatal("net.Dial: ", err)
+		}
+		defer server.Close()
+		buf := make([]byte, 4096)
+		read,err := server.Read(buf)
+		if err != nil {
+			log.Fatal("server.Read: ", err)
+		}
+		fmt.Println(string(buf[:read]))
+		return
+	
+	}
 
+	if *rpcServerPort > 0 {
+		
+		// do not prompt but listen for incoming connections.
+		l, err := net.Listen("tcp", fmt.Sprintf("%s:%v","localhost",*rpcServerPort ))
+		
+		if err != nil {
+			log.Fatal("net.Listen: ", err)
+		}
+		// Close the listener when the application closes.
+		defer l.Close()
+		
+	
+	    for {
+			fmt.Println("Listening on " + l.Addr().String())
+        // Listen for an incoming connection.
+	        conn, err := l.Accept()
+	        if err != nil {
+	            log.Fatal("Listener.Accept: ", err)
+		    }
+
+	        // now prompt and pass in the Connection
+	        prompt(conn)
+	    }
+
+	}else{
+		prompt(nil)
+	}
+
+}
+
+func prompt(connection net.Conn){
+	if(connection != nil){
+		defer connection.Close()
+		defer fmt.Println("Session Data Sent")
+    
+	}
+	
 	path, err := tilde.Expand("~/.aws/credentials")
 	if err != nil {
 		log.Fatal("tilde.Expand: ", err)
@@ -172,6 +231,7 @@ func main() {
 		Searcher:  searcher,
 	}
 
+
 	result, _, err := prompt.Run()
 
 	if err != nil {
@@ -194,6 +254,7 @@ func main() {
 
 	mfaPrompt := promptui.Prompt{
 		Label:    "MFA Token",
+		Mask: '*',
 		Validate: validate,
 	}
 
@@ -238,6 +299,7 @@ func main() {
 		return
 	}
 
+	if(connection == nil){
 	shell := os.Getenv("LOCKSMITH_SHELL")
 
 	if len(shell) == 0 {
@@ -266,4 +328,21 @@ func main() {
 		log.Fatal(cmdStartErr)
 	}
 	cmd.Wait()
+	}else{
+	
+		data,err:=json.Marshal(map[string]interface{}{
+			"Version": 1,
+			"AccessKeyId": aws.StringValue(assumedRole.Credentials.AccessKeyId),
+			"SecretAccessKey": aws.StringValue(assumedRole.Credentials.SecretAccessKey),
+			"SessionToken": aws.StringValue(assumedRole.Credentials.SessionToken),
+			"Expiration": aws.TimeValue(assumedRole.Credentials.Expiration).Format(time.RFC3339),
+		})
+		
+		if err != nil {
+			log.Fatal("json.Marshal: ", err)
+		}
+		
+		connection.Write(data)
+		return;
+	}
 }
